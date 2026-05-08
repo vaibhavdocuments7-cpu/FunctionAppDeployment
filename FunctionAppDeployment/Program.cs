@@ -157,17 +157,54 @@ builder.Services.Configure<ApiKeyOptions>(options =>
 });
 
 // ============================================================================
+// 5. REQUEST THROTTLING (Daily/Monthly Quotas per Client)
+// ============================================================================
+// Unlike rate limiting (short-term: X requests per N seconds), throttling enforces
+// long-term quotas (e.g., 10,000 requests per day per client).
+//
+// HOW IT WORKS:
+//   - Tracks total requests per client per day (resets at midnight UTC)
+//   - Uses client name from API Key middleware (falls back to IP)
+//   - Returns 429 with quota details when exceeded
+//   - Adds X-Quota-Limit, X-Quota-Used, X-Quota-Remaining headers to all responses
+//
+// RATE LIMITING vs THROTTLING:
+//   Rate Limit:  Max 10 requests per 60 seconds (burst protection)
+//   Throttling:  Max 10,000 requests per day (usage cap)
+//   Both can work together — rate limit prevents bursts, throttling prevents overuse
+//
+// ⚠️ LIMITATION: In-memory tracking, resets on app restart.
+//    For production, use Azure Table Storage or Redis for persistent quota tracking.
+builder.Services.Configure<ThrottleOptions>(options =>
+{
+    options.DefaultDailyQuota = 10000;  // Default: 10,000 requests/day
+
+    // Per-client quota overrides (client names must match API Key middleware)
+    options.ClientQuotas = new Dictionary<string, int>
+    {
+        { "Frontend App", 1 },     // Premium client: 50K/day
+        { "Mobile App", 20000 },       // Standard client: 20K/day
+        { "Partner API", 5000 }        // Limited partner: 5K/day
+    };
+
+    options.ExcludedFunctions = new List<string> { "HealthCheck", "IpCheck" };
+});
+
+// ============================================================================
 // MIDDLEWARE PIPELINE ORDER (order matters!)
 // ============================================================================
-// Request → API Key (401) → JWT Validation (401) → IP Filtering (403) → Rate Limiting (429) → Function
-// API Key first: cheapest check, reject invalid keys immediately
-// JWT second: validate token for authenticated users
-// IP Filter third: block banned IPs
-// Rate Limit last: count only authenticated, allowed requests
+// Request → API Key (401) → JWT (401) → IP Filter (403) → Rate Limit (429) → Throttle (429) → Function
+//
+// API Key first:    cheapest check, reject invalid keys immediately
+// JWT second:       validate token for authenticated users
+// IP Filter third:  block banned IPs
+// Rate Limit:       prevent short-term bursts (e.g., 10 req/min)
+// Throttle last:    enforce daily quotas (e.g., 10K req/day)
 builder.UseMiddleware<ApiKeyMiddleware>();
 builder.UseMiddleware<JwtValidationMiddleware>();
 builder.UseMiddleware<IpFilteringMiddleware>();
 builder.UseMiddleware<RateLimitingMiddleware>();
+builder.UseMiddleware<RequestThrottlingMiddleware>();
 
 // Application Insights isn't enabled by default. See https://aka.ms/AAt8mw4.
 // builder.Services
