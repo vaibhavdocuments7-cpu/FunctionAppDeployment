@@ -1,0 +1,77 @@
+================================================================================
+4. API KEY AUTHENTICATION
+================================================================================
+
+WHAT: Custom API key-based authentication for service-to-service access.
+FILE: Middleware/ApiKeyMiddleware.cs
+
+HOW IT WORKS:
+  - Client passes key via X-API-Key header or ?api_key= query parameter
+  - Each key maps to a client name (used for logging & throttling)
+  - Invalid keys are masked in logs for security (ak-f****)
+  - Returns HTTP 401 (Unauthorized) if missing or invalid
+
+CONFIGURATION (Program.cs):
+  builder.Services.Configure<ApiKeyOptions>(options =>
+  {
+      options.HeaderName = "X-API-Key";
+      options.QueryParamName = "api_key";
+      options.ValidApiKeys = new Dictionary<string, string>
+      {
+          { "ak-frontend-app-2024-xyz", "Frontend App" },
+          { "ak-mobile-app-2024-abc", "Mobile App" },
+          { "ak-partner-api-2024-def", "Partner API" }
+      };
+      options.ExcludedFunctions = new List<string> { "HealthCheck", "IpCheck" };
+  });
+
+PRODUCTION NOTE:
+  Store API keys in Azure Key Vault or App Configuration, NOT in code.
+
+================================================================================
+CLIENT IDENTIFICATION FLOW
+================================================================================
+
+  How does throttling know which app is making requests?
+
+  Step 1: Client sends request with header
+          X-API-Key: ak-frontend-app-2024-xyz
+
+  Step 2: ApiKeyMiddleware validates key and looks up client name
+          "ak-frontend-app-2024-xyz" → "Frontend App"
+
+  Step 3: Stores client name in context for downstream middleware
+          context.Items["ApiKeyClient"] = "Frontend App"
+
+  Step 4: RequestThrottlingMiddleware reads client name
+          var client = context.Items["ApiKeyClient"] as string;  // "Frontend App"
+
+  Step 5: Applies per-client quota
+          "Frontend App" → 50,000 requests/day
+
+================================================================================
+HOW TO TEST
+================================================================================
+
+  TEST WITH INSOMNIA:
+    Add header → X-API-Key: ak-frontend-app-2024-xyz
+    Send request → should get 200 (not 401)
+
+  TEST WITHOUT KEY:
+    Remove X-API-Key header
+    Send request → should get 401 Unauthorized:
+    {
+        "error": "Unauthorized",
+        "message": "API key is required. Provide via X-API-Key header or api_key query parameter."
+    }
+
+  TEST WITH INVALID KEY:
+    Add header → X-API-Key: invalid-key-123
+    Send request → should get 401:
+    {
+        "error": "Unauthorized",
+        "message": "Invalid API key provided."
+    }
+
+  TEST VIA QUERY PARAMETER:
+    GET https://your-app.azurewebsites.net/api/Function?api_key=ak-frontend-app-2024-xyz

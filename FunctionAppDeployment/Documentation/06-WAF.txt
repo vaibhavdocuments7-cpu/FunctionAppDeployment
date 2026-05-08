@@ -1,0 +1,65 @@
+================================================================================
+6. WAF INTEGRATION (Web Application Firewall)
+================================================================================
+
+WHAT: Infrastructure-level protection against OWASP Top 10 attacks.
+TYPE: Azure service (NOT a code middleware)
+
+WAF is configured on Azure Front Door or Application Gateway, NOT in your code.
+It blocks malicious traffic BEFORE it reaches your Function App.
+
+================================================================================
+PROTECTS AGAINST
+================================================================================
+
+  - SQL Injection        (e.g., ' OR 1=1 --)
+  - Cross-Site Scripting (e.g., <script>alert()</script>)
+  - Command Injection    (e.g., ; rm -rf /)
+  - Path Traversal       (e.g., ../../etc/passwd)
+  - Bad Bots & Crawlers
+  - DDoS attacks
+
+================================================================================
+SETUP STEPS
+================================================================================
+
+  1. Azure Portal → Create "Web Application Firewall" policy
+  2. Policy for → Azure Front Door
+  3. Enable Managed Rules → OWASP 3.2
+  4. Enable Bot Protection
+  5. Add Custom Rules (geo-blocking, header inspection, etc.)
+  6. Associate with your Front Door profile
+
+================================================================================
+CUSTOM RULES EXAMPLES
+================================================================================
+
+  IF RequestUri CONTAINS "../../"                      → BLOCK
+  IF RequestHeader["User-Agent"] CONTAINS "sqlmap"     → BLOCK
+  IF GeoLocation NOT IN ["IN", "US"]                   → BLOCK
+  IF RequestBodySize > 1MB                             → BLOCK
+
+================================================================================
+COST
+================================================================================
+
+  Azure Front Door Standard:  ~$35/month + per-request
+  Azure Front Door Premium:   ~$330/month (includes WAF)
+
+================================================================================
+WAF vs CODE-LEVEL VALIDATION
+================================================================================
+
+  WAF (Infrastructure):
+    - Blocks at network edge (before reaching your app)
+    - Managed rules updated automatically by Microsoft
+    - Handles DDoS, bot detection
+    - Costs money (Azure service)
+
+  Request Validation Middleware (Code):
+    - Blocks inside your app (defense-in-depth)
+    - Custom regex patterns you control
+    - No extra cost
+    - Doesn't handle DDoS or bots
+
+  BEST PRACTICE: Use BOTH — WAF at the edge + validation in code

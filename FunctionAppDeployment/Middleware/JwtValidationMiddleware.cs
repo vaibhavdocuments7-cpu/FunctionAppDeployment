@@ -82,8 +82,8 @@ namespace FunctionAppDeployment.Middleware
             }
 
             // Token is valid — store claims in FunctionContext for downstream use
-            context.Items["User"] = validationResult.ClaimsPrincipal;
-            httpContext.User = validationResult.ClaimsPrincipal!;
+            context.Items["User"] = validationResult.ClaimsPrincipal!;
+            httpContext.User = validationResult.ClaimsPrincipal ?? new System.Security.Claims.ClaimsPrincipal();
             _logger.LogInformation("JWT validated for user: {User}",
                 validationResult.ClaimsPrincipal?.Identity?.Name ?? "unknown");
 
@@ -133,7 +133,23 @@ namespace FunctionAppDeployment.Middleware
             }
             catch (SecurityTokenInvalidAudienceException)
             {
-                return new JwtTokenValidationResult { IsValid = false, ErrorMessage = "Invalid audience" };
+                // Log the actual audience from the token to help debug mismatches
+                try
+                {
+                    var handler = new JwtSecurityTokenHandler();
+                    var jwt = handler.ReadJwtToken(token);
+                    var tokenAudience = string.Join(", ", jwt.Audiences);
+                    var allowedAudiences = string.Join(", ", _options.AllowedAudiences);
+                    return new JwtTokenValidationResult
+                    {
+                        IsValid = false,
+                        ErrorMessage = $"Invalid audience. Token has: [{tokenAudience}], Allowed: [{allowedAudiences}]"
+                    };
+                }
+                catch
+                {
+                    return new JwtTokenValidationResult { IsValid = false, ErrorMessage = "Invalid audience" };
+                }
             }
             catch (SecurityTokenInvalidIssuerException)
             {

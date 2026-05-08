@@ -72,13 +72,13 @@ builder.Services.Configure<RateLimitOptions>(options =>
 builder.Services.Configure<JwtValidationOptions>(options =>
 {
     options.TenantId = Environment.GetEnvironmentVariable("AzureAd__TenantId") ?? "79e7043b-2d89-4454-9f07-1d8ceb3f0399";
-    options.ClientId = Environment.GetEnvironmentVariable("AzureAd__ClientId") ?? "7e754dae-6f36-42be-a2ee-9f1db190ed84";
+    options.ClientId = Environment.GetEnvironmentVariable("AzureAd__ClientId") ?? "1d96da07-b36b-4790-a3a8-4d2d996d1a3d";
     options.Instance = "https://login.microsoftonline.com/";
     // ✅ FIX: Accept both audience formats (v2.0 with api:// prefix and v1.0 without)
     options.AllowedAudiences = new List<string>
     {
-        "api://7e754dae-6f36-42be-a2ee-9f1db190ed84",   // v2.0 tokens (custom scope like access_as_user)
-        "7e754dae-6f36-42be-a2ee-9f1db190ed84"           // v1.0 tokens / fallback
+        "api://1d96da07-b36b-4790-a3a8-4d2d996d1a3d",   // v2.0 tokens (custom scope like access_as_user)
+        "1d96da07-b36b-4790-a3a8-4d2d996d1a3d"           // v1.0 tokens / fallback
     };
     // Functions that don't require JWT (e.g., health check, IP debug endpoint)
     options.ExcludedFunctions = new List<string> { "HealthCheck", "IpCheck" };
@@ -191,15 +191,88 @@ builder.Services.Configure<ThrottleOptions>(options =>
 });
 
 // ============================================================================
+// 6. REQUEST VALIDATION (SQL Injection, XSS, Path Traversal, Command Injection)
+// ============================================================================
+// Defense-in-depth: code-level protection in addition to WAF.
+// Scans URL, query parameters, headers, and request body for attack patterns.
+//
+// BLOCKS:
+//   - SQL Injection:     ' OR 1=1 --, UNION SELECT, DROP TABLE, etc.
+//   - XSS:              <script>, javascript:, onerror=, eval(), etc.
+//   - Path Traversal:   ../../etc/passwd, ..%2f, etc.
+//   - Command Injection: ; rm -rf, | cat, `command`, etc.
+//   - Oversized payloads, invalid content types, long URLs/headers
+//
+// Returns HTTP 400 (Bad Request) with attack type code
+builder.Services.Configure<RequestValidationOptions>(options =>
+{
+    options.MaxBodySizeBytes = 1_048_576;    // 1MB max body
+    options.MaxUrlLength = 2048;             // 2048 chars max URL
+    options.MaxQueryStringLength = 1024;     // 1024 chars max query string
+    options.MaxHeaderValueLength = 8192;     // 8KB max header value
+    options.BlockSqlInjection = true;
+    options.BlockXss = true;
+    options.BlockPathTraversal = true;
+    options.BlockCommandInjection = true;
+    options.EnforceContentType = true;
+    options.ExcludedFunctions = new List<string> { "HealthCheck", "IpCheck" };
+});
+
+// ============================================================================
+// 7. SECURITY RESPONSE HEADERS
+// ============================================================================
+// Adds security headers to EVERY HTTP response automatically.
+// These headers tell browsers how to handle your content securely.
+//
+// HEADERS ADDED:
+//   Strict-Transport-Security (HSTS) → Forces HTTPS, prevents downgrade attacks
+//   Content-Security-Policy (CSP)    → Controls allowed script/style/image sources
+//   X-Content-Type-Options: nosniff  → Prevents MIME-type sniffing
+//   X-Frame-Options: DENY            → Prevents clickjacking via iframes
+//   X-XSS-Protection: 1; mode=block  → Legacy XSS filter for older browsers
+//   Referrer-Policy                   → Controls referrer info leakage
+//   Permissions-Policy                → Disables unused browser features
+//   Cache-Control: no-store           → Prevents caching of API responses
+//
+// WHY: Even though this is an API (not a website), security headers are important because:
+//   - API responses could be rendered in browsers (e.g., error pages)
+//   - Prevents misconfigured clients from caching sensitive data
+//   - Security scanners (e.g., OWASP ZAP) flag missing headers
+//   - Defense-in-depth: multiple layers of protection
+builder.Services.Configure<SecurityHeadersOptions>(options =>
+{
+    options.EnableHsts = true;
+    options.HstsMaxAgeSeconds = 31536000;                    // 1 year
+    options.HstsIncludeSubDomains = true;
+    options.EnableCsp = true;
+    options.CspPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'";
+    options.EnableNoSniff = true;
+    options.EnableFrameOptions = true;
+    options.FrameOptionsValue = "DENY";
+    options.EnableXssProtection = true;
+    options.EnableReferrerPolicy = true;
+    options.ReferrerPolicy = "strict-origin-when-cross-origin";
+    options.EnablePermissionsPolicy = true;
+    options.PermissionsPolicy = "camera=(), microphone=(), geolocation=(), payment=()";
+    options.EnableNoCacheForApi = true;
+});
+
+// ============================================================================
 // MIDDLEWARE PIPELINE ORDER (order matters!)
 // ============================================================================
-// Request → API Key (401) → JWT (401) → IP Filter (403) → Rate Limit (429) → Throttle (429) → Function
+// Request → Security Headers → Validation (400) → API Key (401) → JWT (401) → IP Filter (403)
+//         → Rate Limit (429) → Throttle (429) → Function (200)
 //
-// API Key first:    cheapest check, reject invalid keys immediately
-// JWT second:       validate token for authenticated users
-// IP Filter third:  block banned IPs
-// Rate Limit:       prevent short-term bursts (e.g., 10 req/min)
-// Throttle last:    enforce daily quotas (e.g., 10K req/day)
+// Security Headers FIRST: runs on every response (including 400/401/403/429 errors)
+//   It uses Response.OnStarting() callback so headers are added just before response is sent
+// Validation first:  block malicious payloads before any processing
+// API Key:           cheapest auth check, reject invalid keys
+// JWT:               validate token for authenticated users
+// IP Filter:         block banned IPs
+// Rate Limit:        prevent short-term bursts (e.g., 10 req/min)
+// Throttle last:     enforce daily quotas (e.g., 10K req/day)
+builder.UseMiddleware<SecurityHeadersMiddleware>();
+builder.UseMiddleware<RequestValidationMiddleware>();
 builder.UseMiddleware<ApiKeyMiddleware>();
 builder.UseMiddleware<JwtValidationMiddleware>();
 builder.UseMiddleware<IpFilteringMiddleware>();

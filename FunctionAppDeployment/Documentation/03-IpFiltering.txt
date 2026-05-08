@@ -1,0 +1,71 @@
+================================================================================
+3. IP FILTERING
+================================================================================
+
+WHAT: Allow or block requests based on client IP address (whitelist/blacklist).
+FILE: Middleware/IpFilteringMiddleware.cs
+
+HOW IT WORKS:
+  - Supports both whitelist (allow only) and blacklist (block specific) modes
+  - Blacklist takes priority over whitelist
+  - Supports CIDR notation (e.g., 203.0.113.0/24)
+  - Reads IP from: X-Forwarded-For → X-Client-IP → X-Real-IP → CLIENT-IP
+                   → X-Original-For → RemoteIpAddress
+  - Returns HTTP 403 (Forbidden)
+
+CONFIGURATION (Program.cs):
+  builder.Services.Configure<IpFilterOptions>(options =>
+  {
+      // Whitelist: Only these IPs can access (leave empty to allow all)
+      options.AllowedIPs = new List<string>
+      {
+          // "203.0.113.0/24",     // Example: Office network
+          // "198.51.100.42",      // Example: Specific server
+      };
+      // Blacklist: These IPs are always blocked (takes priority over whitelist)
+      options.BlockedIPs = new List<string>
+      {
+          "103.235.2.17",         // Example: Block specific IP
+      };
+      options.ExcludedFunctions = new List<string> { "HealthCheck", "IpCheck" };
+  });
+
+================================================================================
+⚠️ MAJOR LIMITATION ON AZURE APP SERVICE
+================================================================================
+
+  IP filtering via middleware does NOT work directly on Azure App Service!
+
+  REASON:
+    Azure Load Balancer / ARR (Application Request Routing) proxy sits between
+    the client and the Function App. The middleware sees the Azure infrastructure
+    IP (e.g., 4.194.122.162), NOT the real client IP (e.g., 103.235.2.17).
+    X-Forwarded-For header is NOT populated by default.
+
+  DEBUGGING:
+    We created /api/IpCheck endpoint to see what IP Azure actually receives.
+    Result:
+      X-Forwarded-For = null
+      X-Real-IP = null
+      X-Client-IP = null
+      RemoteIpAddress = 4.194.122.162  (Azure proxy IP, NOT client IP)
+
+  SOLUTIONS:
+    1. Azure Front Door / Application Gateway → adds X-Forwarded-For with real IP
+       - Setup: Create Front Door profile → Add your Function App as origin
+       - Front Door adds: X-Forwarded-For, X-Azure-ClientIP headers
+
+    2. Azure Portal → Function App → Networking → Access Restrictions (platform level)
+       - This blocks IPs at the Azure infrastructure layer (before code runs)
+       - Works without Front Door
+
+    3. Middleware works correctly when behind Azure Front Door or tested locally
+
+HOW TO TEST:
+  1. Use /api/IpCheck endpoint first to see what IP Azure detects
+  2. Add that IP to BlockedIPs list
+  3. Redeploy and test
+
+  LOCAL TESTING:
+    curl http://localhost:7071/api/IpCheck
+    # Shows 127.0.0.1 — add to BlockedIPs to test blocking

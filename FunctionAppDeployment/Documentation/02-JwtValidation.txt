@@ -1,0 +1,102 @@
+================================================================================
+2. JWT VALIDATION (Azure AD / Entra ID)
+================================================================================
+
+WHAT: Validates Bearer tokens issued by Azure AD using OpenID Connect discovery.
+FILE: Middleware/JwtValidationMiddleware.cs
+PACKAGES:
+  - Microsoft.IdentityModel.Protocols.OpenIdConnect (v8.0.1)
+  - System.IdentityModel.Tokens.Jwt (v8.0.1)
+
+HOW IT WORKS:
+  - Auto-fetches signing keys from Azure AD OpenID Connect metadata
+  - Validates: Issuer, Audience, Lifetime, Signature
+  - Stores validated ClaimsPrincipal in httpContext.User for downstream use
+  - Returns HTTP 401 (Unauthorized) with WWW-Authenticate: Bearer header
+
+================================================================================
+AZURE AD SETUP STEPS
+================================================================================
+
+  1. Azure Portal → Entra ID → App Registrations → Register your app
+  2. Copy TenantId and ClientId from Overview page
+  3. Expose an API → Set Application ID URI (api://{ClientId})
+  4. Expose an API → Add a scope (e.g., "access_as_user")
+  5. Authentication → Add Redirect URI: https://app.insomnia.rest/oauth/redirect
+  6. Certificates & Secrets → Create a client secret
+
+================================================================================
+CONFIGURATION (Program.cs)
+================================================================================
+
+  builder.Services.Configure<JwtValidationOptions>(options =>
+  {
+      options.TenantId = "your-tenant-id";
+      options.ClientId = "your-client-id";
+      options.Instance = "https://login.microsoftonline.com/";
+      // ✅ Accept BOTH audience formats
+      options.AllowedAudiences = new List<string>
+      {
+          "api://your-client-id",   // v2.0 tokens (custom scope)
+          "your-client-id"           // v1.0 tokens / fallback
+      };
+      options.ExcludedFunctions = new List<string> { "HealthCheck", "IpCheck" };
+  });
+
+================================================================================
+ALL ISSUES FACED & FIXES
+================================================================================
+
+  ❌ ERROR 1: AADSTS500011
+     "Resource principal named api://{ClientId} was not found"
+     CAUSE: Application ID URI was not set
+     FIX: Go to Expose an API → Click "Set" next to Application ID URI
+
+  ❌ ERROR 2: AADSTS65005
+     "Application asked for scope 'access_as_user' that doesn't exist"
+     CAUSE: Scope was not created under Expose an API
+     FIX: Expose an API → "+ Add a scope" → Create "access_as_user"
+
+  ❌ ERROR 3: AADSTS500113
+     "No reply address is registered for the application"
+     CAUSE: No redirect URI registered for the app
+     FIX: Authentication → Add Redirect URI
+
+  ❌ ERROR 4: AADSTS50011
+     "Redirect URI mismatch"
+     CAUSE: Redirect URI in Insomnia didn't match Azure AD
+     FIX: Register exact URI: https://app.insomnia.rest/oauth/redirect
+          (Insomnia uses this by default, NOT localhost)
+
+  ❌ ERROR 5: "Token validation failed: Invalid audience"
+     CAUSE: Token's aud = "api://ClientId" but AllowedAudiences only had "ClientId"
+     FIX: Add BOTH formats:
+          "api://ClientId"  → for v2.0 tokens with custom scope
+          "ClientId"        → for v1.0 tokens / Graph tokens
+
+================================================================================
+TESTING WITH INSOMNIA
+================================================================================
+
+  Auth tab → OAuth 2.0 → Authorization Code
+  - Auth URL:      https://login.microsoftonline.com/{TenantId}/oauth2/v2.0/authorize
+  - Token URL:     https://login.microsoftonline.com/{TenantId}/oauth2/v2.0/token
+  - Client ID:     {your-client-id}
+  - Client Secret: {your-secret}
+  - Scope:         api://{ClientId}/access_as_user
+  - Redirect URL:  https://app.insomnia.rest/oauth/redirect
+
+  Steps:
+  1. Click "Fetch Tokens" → browser opens for login
+  2. Sign in with your Azure AD account
+  3. Token appears in Insomnia
+  4. Send request → should get 200 (not 401)
+
+================================================================================
+ACCESS CLAIMS IN FUNCTION CODE
+================================================================================
+
+  var user = req.HttpContext.User;
+  var email = user.FindFirst("preferred_username")?.Value;
+  var name = user.FindFirst("name")?.Value;
+  var objectId = user.FindFirst("http://schemas.microsoft.com/identity/claims/objectidentifier")?.Value;

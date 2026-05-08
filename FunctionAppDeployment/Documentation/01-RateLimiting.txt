@@ -1,0 +1,46 @@
+================================================================================
+1. RATE LIMITING
+================================================================================
+
+WHAT: Limits how many requests a client can make in a short time window.
+FILE: Middleware/RateLimitingMiddleware.cs
+PACKAGE: System.Threading.RateLimiting (v8.0.0)
+
+HOW IT WORKS:
+  - Uses .NET 8 built-in FixedWindowRateLimiter
+  - Tracks requests per client (identified by X-API-Key → X-Forwarded-For → Host IP)
+  - Returns HTTP 429 (Too Many Requests) with Retry-After header
+  - Only applies to HTTP triggers; Queue/Blob triggers are skipped
+
+CONFIGURATION (Program.cs):
+  builder.Services.Configure<RateLimitOptions>(options =>
+  {
+      options.PermitLimit = 10;       // Max 10 requests per window
+      options.WindowInSeconds = 60;   // 60-second window
+      options.QueueLimit = 0;         // No queuing, reject immediately
+  });
+
+LIMITATION:
+  ⚠️ In-memory, per-instance rate limiting.
+  If Function App scales to multiple instances, each has its own counter.
+  For distributed rate limiting, use:
+    - Azure API Management (APIM) rate-limit policy
+    - Azure Redis Cache with a distributed rate limiter
+
+RESPONSE WHEN EXCEEDED:
+  HTTP 429 Too Many Requests
+  Retry-After: 60
+  {
+      "error": "Rate limit exceeded",
+      "retryAfterSeconds": 60,
+      "message": "You have exceeded the limit of 10 requests per 60 seconds."
+  }
+
+HOW TO TEST:
+  1. Set PermitLimit = 3, WindowInSeconds = 10 (low values for testing)
+  2. Send 4 rapid requests in Insomnia
+  3. 4th request should return HTTP 429
+
+  TEST WITH CURL:
+    for i in 1 2 3 4; do curl -s -o /dev/null -w "%{http_code}\n" https://your-app.azurewebsites.net/api/Function; done
+    # Expected: 200, 200, 200, 429

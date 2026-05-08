@@ -1,0 +1,132 @@
+================================================================================
+8. SECURITY RESPONSE HEADERS
+================================================================================
+
+WHAT: Automatically adds security headers to EVERY HTTP response.
+      These headers instruct browsers how to handle your content securely.
+FILE: Middleware/SecurityHeadersMiddleware.cs
+POSITION: First middleware in pipeline (runs via OnStarting callback, so headers
+          are added to ALL responses — including 400, 401, 403, 429 errors)
+
+WHY FOR AN API:
+  - API responses can be rendered in browsers (e.g., error pages, Swagger UI)
+  - Prevents misconfigured clients from caching sensitive data
+  - Security scanners (OWASP ZAP, Qualys) flag missing headers
+  - Defense-in-depth: multiple layers of protection
+  - Required for compliance (PCI DSS, SOC 2, HIPAA)
+
+================================================================================
+HEADERS ADDED (8 headers)
+================================================================================
+
+  ┌────────────────────────────┬───────────────────────────────────────────────┐
+  │ Header                     │ What It Does                                  │
+  ├────────────────────────────┼───────────────────────────────────────────────┤
+  │ Strict-Transport-Security  │ Forces HTTPS for 1 year. Browser remembers    │
+  │ (HSTS)                     │ "always use HTTPS" — prevents SSL stripping   │
+  │                            │ Value: max-age=31536000; includeSubDomains    │
+  ├────────────────────────────┼───────────────────────────────────────────────┤
+  │ Content-Security-Policy    │ Controls which resources (scripts, styles,    │
+  │ (CSP)                      │ images) browser can load. Blocks inline       │
+  │                            │ scripts → strongest XSS prevention.           │
+  │                            │ Value: default-src 'self'; frame-ancestors    │
+  │                            │        'none' (blocks iframes too)            │
+  ├────────────────────────────┼───────────────────────────────────────────────┤
+  │ X-Content-Type-Options     │ Prevents MIME-sniffing (browser guessing      │
+  │                            │ content type). Stops .js served as .png.      │
+  │                            │ Value: nosniff                                │
+  ├────────────────────────────┼───────────────────────────────────────────────┤
+  │ X-Frame-Options            │ Prevents page from loading in <iframe>.       │
+  │                            │ Stops clickjacking attacks.                   │
+  │                            │ Value: DENY (or SAMEORIGIN)                   │
+  ├────────────────────────────┼───────────────────────────────────────────────┤
+  │ X-XSS-Protection           │ Legacy XSS filter for older browsers (IE).    │
+  │                            │ Modern browsers use CSP instead.              │
+  │                            │ Value: 1; mode=block                          │
+  ├────────────────────────────┼───────────────────────────────────────────────┤
+  │ Referrer-Policy            │ Controls referrer info sent when navigating.  │
+  │                            │ Prevents URL/query string leakage.            │
+  │                            │ Value: strict-origin-when-cross-origin        │
+  ├────────────────────────────┼───────────────────────────────────────────────┤
+  │ Permissions-Policy         │ Disables unused browser features (camera,     │
+  │                            │ mic, geolocation). Prevents malicious scripts │
+  │                            │ from accessing device hardware.               │
+  │                            │ Value: camera=(), microphone=(),              │
+  │                            │        geolocation=(), payment=()             │
+  ├────────────────────────────┼───────────────────────────────────────────────┤
+  │ Cache-Control + Pragma     │ Prevents caching of API responses.            │
+  │                            │ Sensitive data won't be stored in browser     │
+  │                            │ or proxy cache.                               │
+  │                            │ Value: no-store, no-cache, must-revalidate    │
+  └────────────────────────────┴───────────────────────────────────────────────┘
+
+================================================================================
+CONFIGURATION (Program.cs)
+================================================================================
+
+  builder.Services.Configure<SecurityHeadersOptions>(options =>
+  {
+      options.EnableHsts = true;
+      options.HstsMaxAgeSeconds = 31536000;   // 1 year
+      options.HstsIncludeSubDomains = true;
+      options.EnableCsp = true;
+      options.CspPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; "
+                        + "img-src 'self' data:; font-src 'self'; frame-ancestors 'none'";
+      options.EnableNoSniff = true;
+      options.EnableFrameOptions = true;
+      options.FrameOptionsValue = "DENY";     // DENY or SAMEORIGIN
+      options.EnableXssProtection = true;
+      options.EnableReferrerPolicy = true;
+      options.ReferrerPolicy = "strict-origin-when-cross-origin";
+      options.EnablePermissionsPolicy = true;
+      options.PermissionsPolicy = "camera=(), microphone=(), geolocation=(), payment=()";
+      options.EnableNoCacheForApi = true;
+  });
+
+================================================================================
+HOW TO TEST
+================================================================================
+
+  TEST WITH CURL (headers only):
+    curl -I https://canarydqdir.azurewebsites.net/api/IpCheck
+
+  TEST WITH INSOMNIA:
+    - Send any request → Click "Headers" tab on response side (right panel)
+    - You should see all 8 security headers in the response
+
+  TEST WITH BROWSER DEVTOOLS:
+    - Open https://canarydqdir.azurewebsites.net/api/IpCheck in browser
+    - Press F12 → Network tab → Click the request → Headers tab
+    - Scroll to Response Headers section
+
+  EXPECTED RESPONSE HEADERS:
+    Strict-Transport-Security: max-age=31536000; includeSubDomains
+    Content-Security-Policy: default-src 'self'; script-src 'self'; ...
+    X-Content-Type-Options: nosniff
+    X-Frame-Options: DENY
+    X-XSS-Protection: 1; mode=block
+    Referrer-Policy: strict-origin-when-cross-origin
+    Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+    Cache-Control: no-store, no-cache, must-revalidate
+    Pragma: no-cache
+
+  VERIFY WITH ONLINE SCANNER:
+    - Go to https://securityheaders.com
+    - Enter: https://canarydqdir.azurewebsites.net/api/IpCheck
+    - Should score A or A+ (without these headers, most APIs score F)
+
+================================================================================
+COMMON CUSTOMIZATIONS
+================================================================================
+
+  # Allow loading images from CDN:
+  options.CspPolicy = "default-src 'self'; img-src 'self' https://cdn.example.com";
+
+  # Allow iframes from same domain only:
+  options.FrameOptionsValue = "SAMEORIGIN";
+
+  # Allow geolocation for location-based app:
+  options.PermissionsPolicy = "camera=(), microphone=(), geolocation=(self), payment=()";
+
+  # Disable HSTS for development (don't force HTTPS locally):
+  options.EnableHsts = false;

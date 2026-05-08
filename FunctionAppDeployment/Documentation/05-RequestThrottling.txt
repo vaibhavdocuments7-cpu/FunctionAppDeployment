@@ -1,0 +1,65 @@
+================================================================================
+5. REQUEST THROTTLING (Daily Quotas)
+================================================================================
+
+WHAT: Enforces long-term usage caps (daily quotas) per client.
+FILE: Middleware/RequestThrottlingMiddleware.cs
+
+================================================================================
+RATE LIMITING vs THROTTLING
+================================================================================
+
+  ┌──────────────────┬──────────────────────┬──────────────────────┐
+  │                  │ Rate Limiting        │ Throttling           │
+  ├──────────────────┼──────────────────────┼──────────────────────┤
+  │ Window           │ 10-60 seconds        │ 1 day                │
+  │ Purpose          │ Prevent bursts       │ Cap total usage      │
+  │ Example          │ Max 3 req/10sec      │ Max 10,000 req/day   │
+  │ Response         │ 429 + Retry-After    │ 429 + quota details  │
+  │ Middleware       │ RateLimitingMiddleware│ RequestThrottling    │
+  └──────────────────┴──────────────────────┴──────────────────────┘
+
+  Both work together:
+    Rate Limit prevents bursts (short-term protection)
+    Throttling prevents overuse (long-term cap)
+
+HOW IT WORKS:
+  - Tracks total requests per client per day (resets at midnight UTC)
+  - Uses client name from API Key middleware (falls back to IP)
+  - Adds quota headers to ALL responses:
+      X-Quota-Limit: 50000
+      X-Quota-Used: 142
+      X-Quota-Remaining: 49858
+  - Returns 429 with detailed quota info when exceeded
+
+CONFIGURATION (Program.cs):
+  builder.Services.Configure<ThrottleOptions>(options =>
+  {
+      options.DefaultDailyQuota = 10000;   // 10K requests/day for unknown clients
+      options.ClientQuotas = new Dictionary<string, int>
+      {
+          { "Frontend App", 50000 },   // Premium: 50K/day
+          { "Mobile App", 20000 },     // Standard: 20K/day
+          { "Partner API", 5000 }      // Limited: 5K/day
+      };
+      options.ExcludedFunctions = new List<string> { "HealthCheck", "IpCheck" };
+  });
+
+RESPONSE WHEN EXCEEDED:
+  HTTP 429 Too Many Requests
+  {
+      "error": "Quota Exceeded",
+      "message": "Daily quota of 50000 requests exceeded. Resets at 2026-05-09 00:00:00 UTC.",
+      "quotaLimit": 50000,
+      "quotaUsed": 50001,
+      "retryAfterSeconds": 34200
+  }
+
+⚠️ LIMITATION: In-memory tracking, resets on app restart.
+   For production, use Azure Table Storage or Redis for persistent tracking.
+
+HOW TO TEST:
+  1. Set "Frontend App" quota to 1 in Program.cs
+  2. Send 2 requests with X-API-Key: ak-frontend-app-2024-xyz
+  3. 2nd request should return HTTP 429 with quota exceeded
+  4. Check response headers for X-Quota-Limit, X-Quota-Used, X-Quota-Remaining

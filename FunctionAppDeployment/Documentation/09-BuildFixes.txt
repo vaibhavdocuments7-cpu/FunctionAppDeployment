@@ -1,0 +1,91 @@
+================================================================================
+9. BUILD WARNINGS — RESOLVED + JWT DEBUGGING
+================================================================================
+
+All build warnings have been resolved. Final build: 0 Warnings, 0 Errors.
+
+================================================================================
+WARNINGS FIXED
+================================================================================
+
+  1. CS8601 — Possible null reference assignment (JwtValidationMiddleware.cs:85)
+     ────────────────────────────────────────────────────────────────────────
+     PROBLEM:
+       context.Items["User"] = validationResult.ClaimsPrincipal;
+       // ClaimsPrincipal is nullable (ClaimsPrincipal?) but Items expects object
+
+     FIX:
+       context.Items["User"] = validationResult.ClaimsPrincipal!;
+       // Null-forgiving (!) is safe here because this line only runs when
+       // IsValid = true, which guarantees ClaimsPrincipal is not null.
+
+     ALSO FIXED:
+       httpContext.User = validationResult.ClaimsPrincipal!;
+       // Changed to:
+       httpContext.User = validationResult.ClaimsPrincipal
+                          ?? new System.Security.Claims.ClaimsPrincipal();
+       // Uses null-coalescing for extra safety since HttpContext.User
+       // should never be null.
+
+  2. CS0168 — Variable 'ex' declared but never used (JwtValidationMiddleware.cs:134)
+     ────────────────────────────────────────────────────────────────────────
+     PROBLEM:
+       catch (SecurityTokenInvalidAudienceException ex)  // 'ex' never used
+       {
+           return new JwtTokenValidationResult { ... };
+       }
+
+     FIX:
+       catch (SecurityTokenInvalidAudienceException)     // Removed 'ex'
+       {
+           // Now reads the token directly to extract actual audience
+           // for better error messaging (see below)
+       }
+
+================================================================================
+JWT DEBUGGING — ENHANCED ERROR MESSAGES
+================================================================================
+
+WHAT: When JWT validation fails with "Invalid audience", the error message
+      now shows the ACTUAL audience from the token vs what's configured.
+
+WHY: After recreating Azure App Registration, the Client ID changes.
+     Old audience values hardcoded in AllowedAudiences won't match new tokens.
+     This enhanced message immediately shows the mismatch.
+
+BEFORE (unhelpful):
+  {
+    "error": "Unauthorized",
+    "message": "Token validation failed: Invalid audience"
+  }
+
+AFTER (shows exact mismatch):
+  {
+    "error": "Unauthorized",
+    "message": "Token validation failed: Invalid audience. Token has: [api://NEW-CLIENT-ID], Allowed: [api://OLD-CLIENT-ID, OLD-CLIENT-ID]"
+  }
+
+HOW TO FIX AUDIENCE MISMATCH:
+  1. Read the error message to see actual vs allowed audiences
+  2. Update Program.cs → AllowedAudiences with the correct Client ID
+  3. Update local.settings.json → AzureAd__ClientId
+  4. Redeploy: func azure functionapp publish <app-name>
+
+CODE (JwtValidationMiddleware.cs):
+  catch (SecurityTokenInvalidAudienceException)
+  {
+      try
+      {
+          var handler = new JwtSecurityTokenHandler();
+          var jwt = handler.ReadJwtToken(token);
+          var tokenAudience = string.Join(", ", jwt.Audiences);
+          var allowedAudiences = string.Join(", ", _options.AllowedAudiences);
+          return new JwtTokenValidationResult
+          {
+              IsValid = false,
+              ErrorMessage = $"Invalid audience. Token has: [{tokenAudience}], "
+                           + $"Allowed: [{allowedAudiences}]"
+          };
+      }
+      catch { /* fallback to generic message */ }
+  }

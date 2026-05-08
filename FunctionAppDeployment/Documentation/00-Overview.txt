@@ -1,0 +1,97 @@
+================================================================================
+       API MANAGEMENT (APIM) CONCEPTS & IMPLEMENTATION GUIDE
+      Azure Function App (.NET 8 Isolated Worker) — Complete Reference
+================================================================================
+
+Project: FunctionAppDeployment
+Date: 08-May-2026
+Stack: .NET 8, Azure Functions v4, Isolated Worker Model
+
+================================================================================
+ARCHITECTURE OVERVIEW
+================================================================================
+
+Internet → [WAF] → [Azure Front Door] → Function App
+                                            │
+                                        Security Headers (adds to every response)
+                                            │
+                                        Request Validation (400) ← SQL Injection, XSS, Path Traversal
+                                            │
+                                        API Key (401)
+                                            │
+                                        JWT Validation (401)
+                                            │
+                                        IP Filtering (403)
+                                            │
+                                        Rate Limiting (429)
+                                            │
+                                        Request Throttling (429)
+                                            │
+                                        Your Function (200) ✅
+
+================================================================================
+FILES CREATED
+================================================================================
+
+  Middleware/SecurityHeadersMiddleware.cs   → HSTS, CSP, X-Frame-Options, etc.
+  Middleware/RequestValidationMiddleware.cs → SQL injection, XSS, path traversal detection
+  Middleware/ApiKeyMiddleware.cs            → Custom API key authentication
+  Middleware/JwtValidationMiddleware.cs     → Azure AD (Entra ID) token validation
+  Middleware/IpFilteringMiddleware.cs       → IP whitelist/blacklist with CIDR support
+  Middleware/RateLimitingMiddleware.cs      → Fixed window rate limiter
+  Middleware/RequestThrottlingMiddleware.cs → Daily quotas per client
+  IpCheckFunction.cs                       → Debug endpoint for IP detection
+  Program.cs                               → All middleware registered with comments
+
+================================================================================
+MIDDLEWARE PIPELINE ORDER (Program.cs)
+================================================================================
+
+  Order matters! Each middleware runs in sequence. If a request is blocked
+  by an earlier middleware, later ones never execute.
+
+  1. Security Headers    → Adds security headers to EVERY response             → 200
+  2. Request Validation  → Blocks malicious input (SQL injection, XSS)         → 400
+  3. API Key             → Authenticates the calling application               → 401
+  4. JWT Validation      → Validates Azure AD / Entra ID bearer token          → 401
+  5. IP Filtering        → Checks client IP against whitelist/blacklist        → 403
+  6. Rate Limiting       → Limits requests per time window                     → 429
+  7. Request Throttling  → Enforces daily quota per client                     → 429
+  8. Your Function       → Executes business logic                             → 200 ✅
+
+  WHY THIS ORDER:
+  - Security Headers first: OnStarting callback ensures headers on ALL responses
+  - Validation next: Never process malicious payloads
+  - API Key before JWT: Cheaper check first (string comparison vs token validation)
+  - IP Filter after auth: Know WHO is calling before checking WHERE from
+  - Rate/Throttle last: Only count validated, authorized requests
+
+================================================================================
+NUGET PACKAGES INSTALLED
+================================================================================
+
+  System.Threading.RateLimiting (v8.0.0)
+  Microsoft.IdentityModel.Protocols.OpenIdConnect (v8.0.1)
+  System.IdentityModel.Tokens.Jwt (v8.0.1)
+
+================================================================================
+AZURE PORTAL SETTINGS (local.settings.json / App Configuration)
+================================================================================
+
+  AzureAd__TenantId = "your-tenant-id"
+  AzureAd__ClientId = "your-client-id"
+
+================================================================================
+DOCUMENTATION FILES INDEX
+================================================================================
+
+  Documentation/00-Overview.txt              → This file (architecture, pipeline, packages)
+  Documentation/01-RateLimiting.txt          → Rate limiting middleware
+  Documentation/02-JwtValidation.txt         → JWT/Azure AD token validation + all errors & fixes
+  Documentation/03-IpFiltering.txt           → IP whitelist/blacklist + Azure limitation
+  Documentation/04-ApiKeys.txt               → API key authentication
+  Documentation/05-RequestThrottling.txt     → Daily quotas per client
+  Documentation/06-WAF.txt                   → Web Application Firewall (Azure service)
+  Documentation/07-RequestValidation.txt     → SQL injection, XSS, path traversal detection
+  Documentation/08-SecurityHeaders.txt       → HSTS, CSP, X-Frame-Options, etc.
+  Documentation/09-BuildFixes.txt            → Build warnings resolved + JWT debugging
