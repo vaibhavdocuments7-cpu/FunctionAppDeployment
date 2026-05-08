@@ -121,12 +121,50 @@ builder.Services.Configure<IpFilterOptions>(options =>
 });
 
 // ============================================================================
+// 4. API KEY AUTHENTICATION
+// ============================================================================
+// Custom API key-based authentication for service-to-service or third-party access.
+// Clients pass the key via X-API-Key header or ?api_key= query parameter.
+//
+// USE CASE: When you want to give different clients their own keys for:
+//   - Tracking usage per client
+//   - Revoking access for a specific client without affecting others
+//   - Different rate limits per client (combine with rate limiting middleware)
+//
+// NOTE: API keys are stored in code here for simplicity.
+// In production, store them in:
+//   - Azure Key Vault
+//   - Azure App Configuration
+//   - Environment variables (Function App → Configuration → Application Settings)
+//
+// HOW TO TEST in Insomnia:
+//   Add header → X-API-Key: your-api-key-1
+//   OR use query param → ?api_key=your-api-key-1
+builder.Services.Configure<ApiKeyOptions>(options =>
+{
+    options.HeaderName = "X-API-Key";
+    options.QueryParamName = "api_key";
+
+    // Valid API keys mapped to client names
+    options.ValidApiKeys = new Dictionary<string, string>
+    {
+        { "ak-frontend-app-2024-xyz", "Frontend App" },
+        { "ak-mobile-app-2024-abc", "Mobile App" },
+        { "ak-partner-api-2024-def", "Partner API" }
+    };
+
+    options.ExcludedFunctions = new List<string> { "HealthCheck", "IpCheck" };
+});
+
+// ============================================================================
 // MIDDLEWARE PIPELINE ORDER (order matters!)
 // ============================================================================
-// Request → JWT Validation (401) → IP Filtering (403) → Rate Limiting (429) → Function
-// JWT first: reject unauthenticated requests before any other processing
-// IP Filter second: block banned IPs before counting rate limits
+// Request → API Key (401) → JWT Validation (401) → IP Filtering (403) → Rate Limiting (429) → Function
+// API Key first: cheapest check, reject invalid keys immediately
+// JWT second: validate token for authenticated users
+// IP Filter third: block banned IPs
 // Rate Limit last: count only authenticated, allowed requests
+builder.UseMiddleware<ApiKeyMiddleware>();
 builder.UseMiddleware<JwtValidationMiddleware>();
 builder.UseMiddleware<IpFilteringMiddleware>();
 builder.UseMiddleware<RateLimitingMiddleware>();
