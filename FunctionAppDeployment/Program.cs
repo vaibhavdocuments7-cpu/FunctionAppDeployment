@@ -7,31 +7,128 @@ var builder = FunctionsApplication.CreateBuilder(args);
 
 builder.ConfigureFunctionsWebApplication();
 
-// Rate Limiting Configuration
+// ============================================================================
+// 1. RATE LIMITING CONFIGURATION
+// ============================================================================
+// Uses .NET 8 built-in System.Threading.RateLimiting (FixedWindowRateLimiter)
+// ⚠️ LIMITATION: This is in-memory, per-instance rate limiting.
+//    If your Function App scales to multiple instances, each instance has its own counter.
+//    For distributed rate limiting across instances, use:
+//    - Azure API Management (APIM) rate-limit policy
+//    - Azure Redis Cache with a distributed rate limiter
+//
+// HOW IT WORKS:
+//    - Tracks requests per client (identified by X-API-Key header → X-Forwarded-For → Host IP)
+//    - Returns HTTP 429 (Too Many Requests) with Retry-After header when limit exceeded
+//    - Only applies to HTTP triggers; Queue/Blob triggers are skipped automatically
 builder.Services.Configure<RateLimitOptions>(options =>
 {
-    options.PermitLimit = 3;       // Max 10 requests
-    options.WindowInSeconds = 10;   // Per 60-second window
-    options.QueueLimit = 0;         // No queuing — reject immediately
+    options.PermitLimit = 3;       // Max 3 requests per window (set low for testing, use 100+ in production)
+    options.WindowInSeconds = 10;   // Per 10-second window (use 60+ in production)
+    options.QueueLimit = 0;         // No queuing — reject immediately when limit reached
 });
 
-// JWT Validation Configuration (Azure AD / Entra ID)
+// ============================================================================
+// 2. JWT VALIDATION CONFIGURATION (Azure AD / Entra ID)
+// ============================================================================
+// Validates Bearer tokens issued by Azure AD using OpenID Connect discovery.
+// Auto-fetches signing keys from: https://login.microsoftonline.com/{TenantId}/v2.0/.well-known/openid-configuration
+//
+// SETUP STEPS (Azure Portal → Entra ID → App Registrations):
+//   1. Register your app → get TenantId and ClientId
+//   2. Expose an API → Set Application ID URI (api://{ClientId})
+//   3. Add a scope (e.g., "access_as_user") under Expose an API
+//   4. Add Redirect URI under Authentication (e.g., https://app.insomnia.rest/oauth/redirect)
+//   5. Create a Client Secret under Certificates & Secrets
+//
+// ISSUES FACED & FIXES:
+//   ❌ AADSTS500011: "Resource principal named api://{ClientId} was not found"
+//      → FIX: Go to Expose an API → Set the Application ID URI (it was missing)
+//
+//   ❌ AADSTS65005: "Application asked for scope 'access_as_user' that doesn't exist"
+//      → FIX: Go to Expose an API → Click "+ Add a scope" → Create "access_as_user" scope
+//
+//   ❌ AADSTS500113: "No reply address is registered for the application"
+//      → FIX: Go to Authentication → Add Redirect URI: https://app.insomnia.rest/oauth/redirect
+//
+//   ❌ AADSTS50011: "Redirect URI mismatch"
+//      → FIX: The Redirect URI in Insomnia must EXACTLY match the one registered in Azure AD
+//             Insomnia uses: https://app.insomnia.rest/oauth/redirect (not localhost)
+//
+//   ❌ "Token validation failed: Invalid audience"
+//      → FIX: Token's audience (aud) was "api://ClientId" but AllowedAudiences only had "ClientId"
+//             Solution: Add BOTH formats to AllowedAudiences:
+//             - "api://ClientId" (v2.0 tokens with custom scope)
+//             - "ClientId" (v1.0 tokens / Graph tokens)
+//
+// TESTING WITH INSOMNIA:
+//   Auth tab → OAuth 2.0 → Authorization Code grant
+//   - Auth URL:    https://login.microsoftonline.com/{TenantId}/oauth2/v2.0/authorize
+//   - Token URL:   https://login.microsoftonline.com/{TenantId}/oauth2/v2.0/token
+//   - Client ID:   {your-client-id}
+//   - Client Secret: {your-client-secret}
+//   - Scope:       api://{ClientId}/access_as_user
+//   - Redirect URL: https://app.insomnia.rest/oauth/redirect
 builder.Services.Configure<JwtValidationOptions>(options =>
 {
     options.TenantId = Environment.GetEnvironmentVariable("AzureAd__TenantId") ?? "79e7043b-2d89-4454-9f07-1d8ceb3f0399";
     options.ClientId = Environment.GetEnvironmentVariable("AzureAd__ClientId") ?? "7e754dae-6f36-42be-a2ee-9f1db190ed84";
     options.Instance = "https://login.microsoftonline.com/";
+    // ✅ FIX: Accept both audience formats (v2.0 with api:// prefix and v1.0 without)
     options.AllowedAudiences = new List<string>
     {
-        "api://7e754dae-6f36-42be-a2ee-9f1db190ed84",
-        "7e754dae-6f36-42be-a2ee-9f1db190ed84"
+        "api://7e754dae-6f36-42be-a2ee-9f1db190ed84",   // v2.0 tokens (custom scope like access_as_user)
+        "7e754dae-6f36-42be-a2ee-9f1db190ed84"           // v1.0 tokens / fallback
     };
-    // Functions that don't require JWT (e.g., health check)
-    options.ExcludedFunctions = new List<string> { "HealthCheck" };
+    // Functions that don't require JWT (e.g., health check, IP debug endpoint)
+    options.ExcludedFunctions = new List<string> { "HealthCheck", "IpCheck" };
 });
 
-// Middleware order matters! JWT runs first, then rate limiting
+// ============================================================================
+// 3. IP FILTERING CONFIGURATION
+// ============================================================================
+// ⚠️ LIMITATION: IP filtering via middleware does NOT work directly on Azure App Service
+// because Azure Load Balancer / ARR (Application Request Routing) proxy sits between
+// the client and the Function App. The middleware sees the Azure infrastructure IP
+// (e.g., 4.194.122.162), NOT the real client IP (e.g., 103.235.2.17).
+// X-Forwarded-For header is NOT populated by default in Azure App Service.
+//
+// DEBUGGING: We created /api/IpCheck endpoint to see what IP Azure actually receives.
+//   Result: X-Forwarded-For = null, RemoteIpAddress = 4.194.122.162 (Azure proxy IP)
+//
+// SOLUTIONS:
+//   1. Use Azure Front Door / Application Gateway → they add X-Forwarded-For with real client IP
+//   2. Use Azure Portal → Function App → Networking → Access Restrictions (platform-level IP filtering)
+//   3. The middleware below works correctly when deployed behind Azure Front Door or tested locally
+builder.Services.Configure<IpFilterOptions>(options =>
+{
+    // Whitelist: Only these IPs can access (leave empty to allow all)
+    options.AllowedIPs = new List<string>
+    {
+        // "203.0.113.0/24",     // Example: Office network
+        // "198.51.100.42",      // Example: Specific server
+    };
+
+    // Blacklist: These IPs are always blocked (takes priority over whitelist)
+    // ⚠️ Will not work without Azure Front Door — see note above
+    options.BlockedIPs = new List<string>
+    {
+        "103.235.2.17",         // Example: Block specific IP
+        // "192.168.1.0/24",     // Example: Block entire subnet
+    };
+
+    options.ExcludedFunctions = new List<string> { "HealthCheck", "IpCheck" };
+});
+
+// ============================================================================
+// MIDDLEWARE PIPELINE ORDER (order matters!)
+// ============================================================================
+// Request → JWT Validation (401) → IP Filtering (403) → Rate Limiting (429) → Function
+// JWT first: reject unauthenticated requests before any other processing
+// IP Filter second: block banned IPs before counting rate limits
+// Rate Limit last: count only authenticated, allowed requests
 builder.UseMiddleware<JwtValidationMiddleware>();
+builder.UseMiddleware<IpFilteringMiddleware>();
 builder.UseMiddleware<RateLimitingMiddleware>();
 
 // Application Insights isn't enabled by default. See https://aka.ms/AAt8mw4.
