@@ -258,11 +258,47 @@ builder.Services.Configure<SecurityHeadersOptions>(options =>
 });
 
 // ============================================================================
+// 8. CORS (Cross-Origin Resource Sharing)
+// ============================================================================
+// Controls which external domains can call your API from a browser.
+// Without CORS, browsers block JavaScript from making requests to your API
+// from a different domain (Same-Origin Policy).
+//
+// HOW IT WORKS:
+//   - Browser sends Origin header with every cross-origin request
+//   - Middleware checks if the origin is in the AllowedOrigins list
+//   - If allowed: adds Access-Control-Allow-Origin header to response
+//   - If not allowed: no CORS headers → browser blocks the response
+//   - Preflight (OPTIONS) requests are handled automatically with 204
+//
+// IMPORTANT:
+//   - "https://www.google.com" ≠ "http://www.google.com" (scheme matters)
+//   - Do NOT use "*" with AllowCredentials = true (browsers reject this)
+//   - host.json also has CORS headers for Azure-level config (belt + suspenders)
+builder.Services.Configure<CorsOptions>(options =>
+{
+    options.AllowedOrigins = new List<string>
+    {
+        //"https://www.google.com"
+        // Add more origins as needed:
+        // "https://your-frontend.azurewebsites.net",
+        // "http://localhost:3000",   // React dev server
+        // "http://localhost:4200",   // Angular dev server
+    };
+    options.AllowedMethods = new List<string> { "GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS" };
+    options.AllowedHeaders = new List<string> { "Content-Type", "Authorization", "X-API-Key", "X-Requested-With" };
+    options.ExposedHeaders = new List<string> { "X-Quota-Limit", "X-Quota-Used", "X-Quota-Remaining", "Retry-After" };
+    options.AllowCredentials = true;
+    options.MaxAgeSeconds = 86400; // Cache preflight for 24 hours
+});
+
+// ============================================================================
 // MIDDLEWARE PIPELINE ORDER (order matters!)
 // ============================================================================
-// Request → Security Headers → Validation (400) → API Key (401) → JWT (401) → IP Filter (403)
+// Request → CORS (preflight/headers) → Security Headers → Validation (400) → API Key (401) → JWT (401) → IP Filter (403)
 //         → Rate Limit (429) → Throttle (429) → Function (200)
 //
+// CORS FIRST: handles preflight OPTIONS immediately, adds CORS headers to all responses
 // Security Headers FIRST: runs on every response (including 400/401/403/429 errors)
 //   It uses Response.OnStarting() callback so headers are added just before response is sent
 // Validation first:  block malicious payloads before any processing
@@ -271,6 +307,7 @@ builder.Services.Configure<SecurityHeadersOptions>(options =>
 // IP Filter:         block banned IPs
 // Rate Limit:        prevent short-term bursts (e.g., 10 req/min)
 // Throttle last:     enforce daily quotas (e.g., 10K req/day)
+builder.UseMiddleware<CorsMiddleware>();
 builder.UseMiddleware<SecurityHeadersMiddleware>();
 builder.UseMiddleware<RequestValidationMiddleware>();
 builder.UseMiddleware<ApiKeyMiddleware>();

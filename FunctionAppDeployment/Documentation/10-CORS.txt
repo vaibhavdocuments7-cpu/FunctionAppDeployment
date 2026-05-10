@@ -1,0 +1,144 @@
+================================================================================
+10. CORS (Cross-Origin Resource Sharing)
+================================================================================
+
+WHAT: Controls which external domains can call your API from a browser.
+FILE: Middleware/CorsMiddleware.cs
+ALSO: host.json → extensions.http.customHeaders (Azure-level fallback)
+
+================================================================================
+WHY CORS IS NEEDED
+================================================================================
+
+  Browsers enforce the Same-Origin Policy:
+    - JavaScript on https://www.google.com CANNOT call your API at
+      https://your-function.azurewebsites.net (different origin)
+    - Without CORS headers, the browser blocks the response
+    - This is a BROWSER security feature — Postman/Insomnia are not affected
+
+  CORS tells the browser: "It's OK, I trust requests from this origin"
+
+================================================================================
+HOW IT WORKS
+================================================================================
+
+  1. Browser sends request with Origin: https://www.google.com header
+  2. CorsMiddleware checks if origin is in AllowedOrigins list
+  3. If allowed: adds Access-Control-Allow-Origin header to response
+  4. If not allowed: no CORS headers → browser blocks the response
+
+  PREFLIGHT (OPTIONS) REQUESTS:
+    - For "complex" requests (POST with JSON, custom headers like X-API-Key),
+      browser first sends an OPTIONS request to check if CORS is allowed
+    - CorsMiddleware responds with 204 No Content + all CORS headers
+    - Browser then sends the actual request
+
+================================================================================
+CONFIGURATION (Program.cs)
+================================================================================
+
+  builder.Services.Configure<CorsOptions>(options =>
+  {
+      options.AllowedOrigins = new List<string>
+      {
+          "https://www.google.com",
+          // "https://your-frontend.azurewebsites.net",
+          // "http://localhost:3000",   // React dev server
+          // "http://localhost:4200",   // Angular dev server
+      };
+      options.AllowedMethods = new List<string>
+      {
+          "GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"
+      };
+      options.AllowedHeaders = new List<string>
+      {
+          "Content-Type", "Authorization", "X-API-Key", "X-Requested-With"
+      };
+      options.ExposedHeaders = new List<string>
+      {
+          "X-Quota-Limit", "X-Quota-Used", "X-Quota-Remaining", "Retry-After"
+      };
+      options.AllowCredentials = true;
+      options.MaxAgeSeconds = 86400;  // Cache preflight for 24 hours
+  });
+
+================================================================================
+RESPONSE HEADERS ADDED
+================================================================================
+
+  Access-Control-Allow-Origin: https://www.google.com
+  Access-Control-Allow-Methods: GET, POST, PUT, DELETE, PATCH, OPTIONS
+  Access-Control-Allow-Headers: Content-Type, Authorization, X-API-Key, X-Requested-With
+  Access-Control-Expose-Headers: X-Quota-Limit, X-Quota-Used, X-Quota-Remaining, Retry-After
+  Access-Control-Allow-Credentials: true
+  Access-Control-Max-Age: 86400
+
+================================================================================
+IMPORTANT NOTES
+================================================================================
+
+  ⚠️ Origin comparison is exact match (case-insensitive):
+     "https://www.google.com" ≠ "http://www.google.com" (scheme matters)
+     "https://www.google.com" ≠ "https://google.com" (subdomain matters)
+     "https://www.google.com" ≠ "https://www.google.com/" (trailing slash)
+
+  ⚠️ Do NOT use AllowedOrigins = ["*"] with AllowCredentials = true
+     Browsers reject this combination. Use specific origins instead.
+
+  ⚠️ CORS is enforced by BROWSERS only. API tools (Postman, Insomnia, curl)
+     do not send Origin headers and are not affected by CORS.
+
+================================================================================
+DUAL CONFIGURATION (Belt + Suspenders)
+================================================================================
+
+  1. host.json → extensions.http.customHeaders
+     - Azure-level CORS headers (applied by Azure infrastructure)
+     - Simple but limited (no origin validation, no preflight handling)
+
+  2. CorsMiddleware (code)
+     - Full control: origin validation, preflight handling, logging
+     - Runs before all other middleware in the pipeline
+
+  Both are configured. The middleware provides the real CORS logic;
+  host.json acts as a fallback if middleware doesn't run.
+
+================================================================================
+PIPELINE POSITION
+================================================================================
+
+  CORS is FIRST in the middleware pipeline:
+    CORS → Security Headers → Validation → API Key → JWT → IP Filter
+         → Rate Limit → Throttle → Function
+
+  WHY FIRST:
+    - Preflight OPTIONS must be handled immediately (before auth checks)
+    - CORS headers must be on ALL responses (including 401, 403, 429 errors)
+    - If CORS headers are missing on error responses, browser hides the error
+      from JavaScript, making debugging impossible
+
+================================================================================
+HOW TO TEST
+================================================================================
+
+  TEST PREFLIGHT:
+    curl -X OPTIONS https://your-app.azurewebsites.net/api/Function \
+         -H "Origin: https://www.google.com" \
+         -H "Access-Control-Request-Method: POST" \
+         -H "Access-Control-Request-Headers: Content-Type, X-API-Key" \
+         -v
+    # Should return 204 with all Access-Control-* headers
+
+  TEST BLOCKED ORIGIN:
+    curl -X GET https://your-app.azurewebsites.net/api/Function \
+         -H "Origin: https://evil-site.com" \
+         -v
+    # Response should NOT have Access-Control-Allow-Origin header
+
+  TEST FROM BROWSER CONSOLE:
+    // Open www.google.com → F12 → Console
+    fetch('https://your-app.azurewebsites.net/api/Function')
+      .then(r => r.json())
+      .then(console.log)
+      .catch(console.error);
+    // Should work if CORS is configured correctly
